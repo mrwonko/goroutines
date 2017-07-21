@@ -1,5 +1,8 @@
 module Main where
 
+import Goroutines
+
 main :: IO ()
 main = do
-  putStrLn "hello world"
+  putStrLn $ runGoroutine $ do
+    return "hello world"
