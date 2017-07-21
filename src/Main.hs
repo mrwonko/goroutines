@@ -3,14 +3,14 @@ module Main where
 import Data.Maybe (isJust, fromJust)
 import Goroutines
 
-takeWhileJustM :: Monad m => (a -> Maybe b) -> m a -> m [b]
-takeWhileJustM unpack action = fmap reverse $ takeWhileJustM' unpack action []
+takeWhileM :: Monad m => (a -> Bool) -> m a -> m [a]
+takeWhileM cond action = fmap reverse $ takeWhileM' cond action []
   where
-    takeWhileJustM' unpack action xs = do
-      y <- action
-      case unpack y of
-        (Just x) -> takeWhileJustM' unpack action (x:xs)
-        Nothing -> return xs
+    takeWhileM' cond action xs = do
+      x <- action
+      if cond x
+        then takeWhileM' cond action (x:xs)
+        else return xs
 
 main :: IO ()
 main = do
@@ -20,4 +20,4 @@ main = do
       writeC w "hello"
       writeC w "world"
       close w
-    takeWhileJustM id (readC r)
+    fmap (fmap fromJust) (takeWhileM (isJust) (readC r))
