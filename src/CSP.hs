@@ -1,6 +1,11 @@
 {-# LANGUAGE ExistentialQuantification #-}
 
-module CSP where
+module CSP
+  ( CSP
+  , go, newChannel, readChannel, writeChannel, closeChannel, orElse
+  , eval
+  , Channel
+  ) where
 
 -- Thanks to Alex Biehl for the idea of using continuations
 
@@ -23,6 +28,13 @@ data CSP a =
   | forall b. CloseChannel (Channel b) (Bool -> CSP a)
   | forall b. OrElse (CSP b) (CSP b) (b -> CSP a) -- choose first to be ready
   -- | forall b. AndThen (CSP b) (b -> CSP a) -- This would make implementing fmap, <*> and >>= trivial
+
+go csp = Go csp $ return ()
+newChannel cap = NewChannel cap return
+readChannel chan = ReadChannel chan return
+writeChannel chan val = WriteChannel chan val return
+closeChannel chan = CloseChannel chan return
+a `orElse` b = OrElse a b return
 
 -- eval :: CS a -> STM a -- STM also has channels, would thus make for a straightforward implementation
 eval :: CSP a -> Maybe a

@@ -15,9 +15,9 @@ takeWhileM cond action = fmap reverse $ takeWhileM' cond action []
 main :: IO ()
 main = do
   putStrLn $ show $ fmap unlines $ eval $ do
-    c <- NewChannel 0 Return
-    Go (do
-      WriteChannel c "hello" Return
-      WriteChannel c "world" Return
-      CloseChannel c Return) $ Return ()
-    fmap (fmap fromJust) (takeWhileM (isJust) (ReadChannel c Return))
+    c <- newChannel 0
+    go $ do
+      writeChannel c "hello"
+      writeChannel c "world"
+      closeChannel c
+    fmap (fmap fromJust) (takeWhileM (isJust) (readChannel c))
