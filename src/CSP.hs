@@ -7,15 +7,16 @@ module CSP
   , ChannelHandle
   ) where
 
-import qualified Data.Map.Lazy as Map -- or Strict?
+import Control.Monad.ST
+import Data.STRef
 
 -- Thanks to Alex Biehl for the idea of using continuations
 
-data WriteWaiter a = forall b. WriteWaiter a (Bool -> CSP b)
+data WriteWaiter a = forall s b. WriteWaiter a (Bool -> CSP b)
 
-data ReadWaiter a = forall b. ReadWaiter (Maybe a -> CSP b)
+data ReadWaiter a = forall s b. ReadWaiter (Maybe a -> CSP b)
 
-data ChannelHandle a = ChannelHandle Int
+data ChannelHandle s a = ChannelHandle (STRef s (Channel a))
 data Channel a = Channel
   { capacity :: Int
   , closed :: Bool
@@ -23,15 +24,12 @@ data Channel a = Channel
   , readWaiters :: [ReadWaiter a]
   , writeWaiters :: [WriteWaiter a]
   }
-data UntypedChannel = forall a. UntypedChannel (Channel a)
 
-type Channels = Map.Map Int UntypedChannel
+writeBlocks :: Channel a -> Bool
+writeBlocks chan = length (elements chan) == capacity chan
 
-writeBlocks :: UntypedChannel -> Bool
-writeBlocks (UntypedChannel chan) = length (elements chan) == capacity chan
-
-readBlocks :: UntypedChannel -> Bool
-readBlocks (UntypedChannel chan) = null $ elements chan
+readBlocks :: Channel a -> Bool
+readBlocks chan = null $ elements chan
 
 mkChannel :: Int -> Channel a
 mkChannel cap = Channel
@@ -45,10 +43,10 @@ mkChannel cap = Channel
 data CSP a =
     Return a
   | forall b. Go (CSP b) (CSP a)
-  | forall b. NewChannel Int (ChannelHandle b -> CSP a)
-  | forall b. ReadChannel (ChannelHandle b) (Maybe b -> CSP a)
-  | forall b. WriteChannel (ChannelHandle b) b (Bool -> CSP a)
-  | forall b. CloseChannel (ChannelHandle b) (Bool -> CSP a)
+  | forall s b. NewChannel Int (ChannelHandle s b -> CSP a)
+  | forall s b. ReadChannel (ChannelHandle s b) (Maybe b -> CSP a)
+  | forall s b. WriteChannel (ChannelHandle s b) b (Bool -> CSP a)
+  | forall s b. CloseChannel (ChannelHandle s b) (Bool -> CSP a)
   | forall b. OrElse (CSP b) (CSP b) (b -> CSP a) -- choose first to be ready
 
 go csp = Go csp $ return ()
@@ -58,65 +56,45 @@ writeChannel chan val = WriteChannel chan val return
 closeChannel chan = CloseChannel chan return
 a `orElse` b = OrElse a b return
 
-data ReadyCSP = forall a. ReadyCSP (CSP a)
+data ReadyCSP s = forall a. ReadyCSP (CSP a)
 
-data EvalState a = EvalState
-  { esResult :: Maybe a
-  , esReadyCSPs :: [ReadyCSP] -- excluding the currently evaluating one
-  , esChannels :: Channels
+data EvalState s a = EvalState
+  { esReadyCSPs :: [ReadyCSP s] -- excluding the currently evaluating one
   , esChannelCounter :: Int
   }
 
-initialEvalState :: EvalState a
+initialEvalState :: EvalState s a
 initialEvalState = EvalState
-  { esResult = Nothing
-  , esReadyCSPs = []
-  , esChannels = Map.empty
+  { esReadyCSPs = []
   , esChannelCounter = 0
   }
 
-esAddChannel :: Int -> EvalState a -> (Channel a, EvalState a)
-esAddChannel cap state = let chan = mkChannel cap in (chan, state
-  { esChannelCounter = esChannelCounter state + 1
-  , esChannels = Map.insert (esChannelCounter state) (UntypedChannel chan) (esChannels state)
-  })
-
-esSetChannel :: Int -> (Channel a) -> EvalState b -> EvalState b
-esSetChannel id chan state = state
-  { esChannels = Map.insert id (UntypedChannel chan) (esChannels state)
-  }
-
--- esGetChannel :: Int -> EvalState a -> Channel b
--- esGetChannel id state = case esChannels state Map.! id of
---   (UntypedChannel chan) -> chan
-
--- eval :: CS a -> STM a -- STM also has channels, would thus make for a straightforward implementation
 eval :: CSP a -> Maybe a
-eval g = esResult $ loop g initialEvalState
-  where
-    loop :: CSP a -> EvalState a -> EvalState a
-    -- return: store result, done
-    loop (Return a) state = state
-      { esResult = Just a
-      }
-    -- go: add to ready CSPs
-    loop (Go g cont) state = loop cont state
-      { esReadyCSPs = (ReadyCSP g):esReadyCSPs state
-      }
-    -- newChannel: call continuation with new channel
-    loop (NewChannel cap cont) state = loop (cont $ ChannelHandle $ esChannelCounter state) state
-      { esChannelCounter = esChannelCounter state + 1
-      } -- TODO: store 
-    -- readChannel: continue if something available, block and continue one of the other CSPs otherwise
-    loop (ReadChannel chan cont) state = state -- TODO
-    -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
-    loop (WriteChannel chan x cont) state = state -- TODO
-    -- closeChannel: set channel to closed, unless it already was
-    loop (CloseChannel chan cont) state = state -- TODO
-    -- orElse: TBD
-    loop (OrElse g1 g2 cont) state = state -- TODO
+eval g = runST $ do
+    stateRef <- newSTRef initialEvalState
+    let
+      -- return: store result, done
+      eval' (Return a) = return $ Just a
+      -- go: add to ready CSPs
+      eval' (Go g cont) = do
+        state <- readSTRef stateRef
+        writeSTRef stateRef state
+          { esReadyCSPs = (ReadyCSP g):esReadyCSPs state
+          }
+        eval' cont
+      -- newChannel: call continuation with new channel
+      eval' (NewChannel cap cont) = undefined -- TODO
+      -- readChannel: continue if something available, block and continue one of the other CSPs otherwise
+      eval' (ReadChannel chan cont) = undefined -- TODO
+      -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
+      eval' (WriteChannel chan x cont) = undefined -- TODO
+      -- closeChannel: set channel to closed, unless it already was
+      eval' (CloseChannel chan cont) = undefined -- TODO
+      -- orElse: TBD
+      eval' (OrElse g1 g2 cont) = undefined -- TODO
+    eval' g
 
-instance Functor CSP where
+instance Functor (CSP) where
   fmap f (Return a) = Return $ f a
   fmap f (Go g cont) = Go g $ fmap f cont
   fmap f (NewChannel cap cont) = NewChannel cap $ \chan -> fmap f $ cont chan
@@ -125,7 +103,7 @@ instance Functor CSP where
   fmap f (CloseChannel chan cont) = CloseChannel chan $ \success -> fmap f $ cont success
   fmap f (OrElse g1 g2 cont) = OrElse g1 g2 $ \val -> fmap f $ cont val
 
-instance Applicative CSP where
+instance Applicative (CSP) where
   pure = Return
   (Return f) <*> x = fmap f x
   (Go g cont) <*> x = Go g $ cont <*> x
@@ -135,7 +113,7 @@ instance Applicative CSP where
   (CloseChannel chan cont) <*> x = CloseChannel chan $ (<*> x) . cont
   (OrElse g1 g2 cont) <*> x = OrElse g1 g2 $ (<*> x) . cont 
 
-instance Monad CSP where
+instance Monad (CSP) where
   return = pure
   (Return a) >>= f = f a
   (Go g cont) >>= f = Go g $ cont >>= f
