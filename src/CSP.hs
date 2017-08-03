@@ -12,11 +12,11 @@ import Data.STRef
 
 -- Thanks to Alex Biehl for the idea of using continuations
 
-data WriteWaiter a = forall s b. WriteWaiter a (Bool -> CSP b)
+data WriteWaiter a = forall b. WriteWaiter a (Bool -> CSP b)
 
-data ReadWaiter a = forall s b. ReadWaiter (Maybe a -> CSP b)
+data ReadWaiter a = forall b. ReadWaiter (Maybe a -> CSP b)
 
-data ChannelHandle s a = ChannelHandle (STRef s (Channel a))
+data ChannelHandle a = forall s. ChannelHandle (STRef s (Channel a))
 data Channel a = Channel
   { capacity :: Int
   , closed :: Bool
@@ -43,10 +43,10 @@ mkChannel cap = Channel
 data CSP a =
     Return a
   | forall b. Go (CSP b) (CSP a)
-  | forall s b. NewChannel Int (ChannelHandle s b -> CSP a)
-  | forall s b. ReadChannel (ChannelHandle s b) (Maybe b -> CSP a)
-  | forall s b. WriteChannel (ChannelHandle s b) b (Bool -> CSP a)
-  | forall s b. CloseChannel (ChannelHandle s b) (Bool -> CSP a)
+  | forall b. NewChannel Int (ChannelHandle b -> CSP a)
+  | forall b. ReadChannel (ChannelHandle b) (Maybe b -> CSP a)
+  | forall b. WriteChannel (ChannelHandle b) b (Bool -> CSP a)
+  | forall b. CloseChannel (ChannelHandle b) (Bool -> CSP a)
   | forall b. OrElse (CSP b) (CSP b) (b -> CSP a) -- choose first to be ready
 
 go csp = Go csp $ return ()
@@ -83,7 +83,9 @@ eval g = runST $ do
           }
         eval' cont
       -- newChannel: call continuation with new channel
-      eval' (NewChannel cap cont) = undefined -- TODO
+      eval' (NewChannel cap cont) = do
+        chan <- newSTRef $ mkChannel cap
+        eval' $ cont $ ChannelHandle chan
       -- readChannel: continue if something available, block and continue one of the other CSPs otherwise
       eval' (ReadChannel chan cont) = undefined -- TODO
       -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
