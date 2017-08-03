@@ -60,13 +60,11 @@ data ReadyCSP s = forall a. ReadyCSP (CSP a)
 
 data EvalState s a = EvalState
   { esReadyCSPs :: [ReadyCSP s] -- excluding the currently evaluating one
-  , esChannelCounter :: Int
   }
 
 initialEvalState :: EvalState s a
 initialEvalState = EvalState
   { esReadyCSPs = []
-  , esChannelCounter = 0
   }
 
 eval :: CSP a -> Maybe a
