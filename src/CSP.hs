@@ -4,7 +4,7 @@ module CSP
   ( CSP
   , go, newChannel, readChannel, writeChannel, closeChannel, orElse
   , eval
-  , ChannelHandle
+  , ChannelRef
   ) where
 
 import Control.Monad.ST
@@ -16,7 +16,7 @@ data WriteWaiter a = forall b. WriteWaiter a (Bool -> CSP b)
 
 data ReadWaiter a = forall b. ReadWaiter (Maybe a -> CSP b)
 
-data ChannelHandle a = forall s. ChannelHandle (STRef s (Channel a))
+data ChannelRef a = forall s. ChannelRef (STRef s (Channel a))
 data Channel a = Channel
   { capacity :: Int
   , closed :: Bool
@@ -43,10 +43,10 @@ mkChannel cap = Channel
 data CSP a =
     Return a
   | forall b. Go (CSP b) (CSP a)
-  | forall b. NewChannel Int (ChannelHandle b -> CSP a)
-  | forall b. ReadChannel (ChannelHandle b) (Maybe b -> CSP a)
-  | forall b. WriteChannel (ChannelHandle b) b (Bool -> CSP a)
-  | forall b. CloseChannel (ChannelHandle b) (Bool -> CSP a)
+  | forall b. NewChannel Int (ChannelRef b -> CSP a)
+  | forall b. ReadChannel (ChannelRef b) (Maybe b -> CSP a)
+  | forall b. WriteChannel (ChannelRef b) b (Bool -> CSP a)
+  | forall b. CloseChannel (ChannelRef b) (Bool -> CSP a)
   | forall b. OrElse (CSP b) (CSP b) (b -> CSP a) -- choose first to be ready
 
 go csp = Go csp $ return ()
@@ -82,14 +82,14 @@ eval g = runST $ do
         eval' cont
       -- newChannel: call continuation with new channel
       eval' (NewChannel cap cont) = do
-        chan <- newSTRef $ mkChannel cap
-        eval' $ cont $ ChannelHandle chan
+        chanRef <- newSTRef $ mkChannel cap
+        eval' $ cont $ ChannelRef chanRef
       -- readChannel: continue if something available, block and continue one of the other CSPs otherwise
-      eval' (ReadChannel chan cont) = undefined -- TODO
+      eval' (ReadChannel chanRef cont) = undefined -- TODO
       -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
-      eval' (WriteChannel chan x cont) = undefined -- TODO
+      eval' (WriteChannel chanRef x cont) = undefined -- TODO
       -- closeChannel: set channel to closed, unless it already was
-      eval' (CloseChannel chan cont) = undefined -- TODO
+      eval' (CloseChannel chanRef cont) = undefined -- TODO
       -- orElse: TBD
       eval' (OrElse g1 g2 cont) = undefined -- TODO
     eval' g
