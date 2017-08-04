@@ -1,4 +1,5 @@
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE RankNTypes #-}
 
 module CSP
   ( CSP
@@ -12,26 +13,26 @@ import Data.STRef
 
 -- Thanks to Alex Biehl for the idea of using continuations
 
-data WriteWaiter a = forall b. WriteWaiter a (Bool -> CSP b)
+data WriteWaiter s a = forall b. WriteWaiter a (Bool -> CSP s b)
 
-data ReadWaiter a = forall b. ReadWaiter (Maybe a -> CSP b)
+data ReadWaiter s a = forall b. ReadWaiter (Maybe a -> CSP s b)
 
-data ChannelRef a = forall s. ChannelRef (STRef s (Channel a))
-data Channel a = Channel
+data ChannelRef s a = ChannelRef (STRef s (Channel s a))
+data Channel s a = Channel
   { capacity :: Int
   , closed :: Bool
   , elements :: [a]
-  , readWaiters :: [ReadWaiter a]
-  , writeWaiters :: [WriteWaiter a]
+  , readWaiters :: [ReadWaiter s a]
+  , writeWaiters :: [WriteWaiter s a]
   }
 
-writeBlocks :: Channel a -> Bool
+writeBlocks :: Channel s a -> Bool
 writeBlocks chan = length (elements chan) == capacity chan
 
-readBlocks :: Channel a -> Bool
+readBlocks :: Channel s a -> Bool
 readBlocks chan = null $ elements chan
 
-mkChannel :: Int -> Channel a
+mkChannel :: Int -> Channel s a
 mkChannel cap = Channel
     { capacity = cap
     , closed = False
@@ -40,23 +41,24 @@ mkChannel cap = Channel
     , writeWaiters = []
     }
 
-data CSP a =
+data CSP s a =
     Return a
-  | forall b. Go (CSP b) (CSP a)
-  | forall b. NewChannel Int (ChannelRef b -> CSP a)
-  | forall b. ReadChannel (ChannelRef b) (Maybe b -> CSP a)
-  | forall b. WriteChannel (ChannelRef b) b (Bool -> CSP a)
-  | forall b. CloseChannel (ChannelRef b) (Bool -> CSP a)
-  | forall b. OrElse (CSP b) (CSP b) (b -> CSP a) -- choose first to be ready
+  | forall b. Go (CSP s b) (CSP s a)
+  | forall b. NewChannel Int (ChannelRef s b -> CSP s a)
+  | forall b. ReadChannel (ChannelRef s b) (Maybe b -> CSP s a)
+  | forall b. WriteChannel (ChannelRef s b) b (Bool -> CSP s a)
+  | forall b. CloseChannel (ChannelRef s b) (Bool -> CSP s a)
+  | forall b. OrElse (CSP s b) (CSP s b) (b -> CSP s a) -- choose first to be ready
 
 go csp = Go csp $ return ()
 newChannel cap = NewChannel cap return
+readChannel :: forall s a. ChannelRef s a -> CSP s (Maybe a)
 readChannel chan = ReadChannel chan return
 writeChannel chan val = WriteChannel chan val return
 closeChannel chan = CloseChannel chan return
 a `orElse` b = OrElse a b return
 
-data ReadyCSP s = forall a. ReadyCSP (CSP a)
+data ReadyCSP s = forall a. ReadyCSP (CSP s a)
 
 data EvalState s a = EvalState
   { esReadyCSPs :: [ReadyCSP s] -- excluding the currently evaluating one
@@ -67,7 +69,7 @@ initialEvalState = EvalState
   { esReadyCSPs = []
   }
 
-eval :: CSP a -> Maybe a
+eval :: (forall s. CSP s a) -> Maybe a
 eval g = runST $ do
     stateRef <- newSTRef initialEvalState
     let
@@ -85,7 +87,9 @@ eval g = runST $ do
         chanRef <- newSTRef $ mkChannel cap
         eval' $ cont $ ChannelRef chanRef
       -- readChannel: continue if something available, block and continue one of the other CSPs otherwise
-      eval' (ReadChannel chanRef cont) = undefined -- TODO
+      eval' (ReadChannel (ChannelRef chanRef) cont) = do
+        chan <- readSTRef chanRef
+        return Nothing -- TODO
       -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
       eval' (WriteChannel chanRef x cont) = undefined -- TODO
       -- closeChannel: set channel to closed, unless it already was
@@ -94,7 +98,7 @@ eval g = runST $ do
       eval' (OrElse g1 g2 cont) = undefined -- TODO
     eval' g
 
-instance Functor (CSP) where
+instance Functor (CSP s) where
   fmap f (Return a) = Return $ f a
   fmap f (Go g cont) = Go g $ fmap f cont
   fmap f (NewChannel cap cont) = NewChannel cap $ \chan -> fmap f $ cont chan
@@ -103,7 +107,7 @@ instance Functor (CSP) where
   fmap f (CloseChannel chan cont) = CloseChannel chan $ \success -> fmap f $ cont success
   fmap f (OrElse g1 g2 cont) = OrElse g1 g2 $ \val -> fmap f $ cont val
 
-instance Applicative (CSP) where
+instance Applicative (CSP s) where
   pure = Return
   (Return f) <*> x = fmap f x
   (Go g cont) <*> x = Go g $ cont <*> x
@@ -113,7 +117,7 @@ instance Applicative (CSP) where
   (CloseChannel chan cont) <*> x = CloseChannel chan $ (<*> x) . cont
   (OrElse g1 g2 cont) <*> x = OrElse g1 g2 $ (<*> x) . cont 
 
-instance Monad (CSP) where
+instance Monad (CSP s) where
   return = pure
   (Return a) >>= f = f a
   (Go g cont) >>= f = Go g $ cont >>= f
