@@ -14,7 +14,7 @@ takeWhileM cond action = fmap reverse $ takeWhileM' cond action []
 
 main :: IO ()
 main = do
-  putStrLn $ show $ fmap unlines $ eval $ do
+  putStrLn $ show $ fmap unlines $ runCSP $ do
     c <- newChannel 0
     go $ do
       writeChannel c "hello"
