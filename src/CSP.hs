@@ -119,11 +119,11 @@ runCSP g = runST $ do
                   }
                 eval (cont $ Just x) finally
       -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
-      eval (WriteChannel chanRef x cont) finally = undefined -- TODO
+      eval (WriteChannel chanRef x cont) finally = return () -- TODO
       -- closeChannel: set channel to closed, unless it already was, and complete read and write waiters
-      eval (CloseChannel chanRef cont) finally = undefined -- TODO
+      eval (CloseChannel chanRef cont) finally = return () -- TODO
       -- orElse: TBD
-      eval (OrElse g1 g2 cont) finally = undefined -- TODO
+      eval (OrElse g1 g2 cont) finally = return () -- TODO
 
       evalUntilDone = do
         state <- readSTRef stateRef
@@ -134,6 +134,9 @@ runCSP g = runST $ do
           else case esReadyCSPs state of
             [] -> return Nothing
             (ReadyCSP csp finally):xs -> do
+              writeSTRef stateRef state
+                { esReadyCSPs = xs
+                }
               eval csp finally
               evalUntilDone
 
