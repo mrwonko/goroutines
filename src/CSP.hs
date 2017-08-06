@@ -139,14 +139,26 @@ runCSP g = runST $ do
         chan <- readSTRef chanRef
         if closed chan
           then eval (cont False) finally
-          else  if writeBlocks chan
-            then return () -- TODO
-            else do
-              -- still space in channel, store result and continue
+          else case readWaiters chan of
+            -- if capacity is 0, check if there's a reader we can directly send this to
+            ReadWaiter cont' finally' : ws | capacity chan == 0 -> do
               writeSTRef chanRef chan
-                { elements = elements chan ++ [x]
+                { readWaiters = ws
                 }
+              -- again, we could also swap who is readied and who is executed here
+              ready (cont' $ Just x) finally'
               eval (cont True) finally
+            _ -> if writeBlocks chan
+              -- enqueue for waiting
+              then writeSTRef chanRef chan
+                  { writeWaiters = WriteWaiter x cont finally : writeWaiters chan
+                  }
+              else do
+                -- still space in channel, store result and continue
+                writeSTRef chanRef chan
+                  { elements = elements chan ++ [x]
+                  }
+                eval (cont True) finally
       -- closeChannel: set channel to closed, unless it already was, and complete read and write waiters
       eval (CloseChannel (ChannelRef chanRef) cont) finally = return () -- TODO
       -- orElse: TBD
