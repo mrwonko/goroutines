@@ -10,12 +10,13 @@ module CSP
 
 import Control.Monad.ST
 import Data.STRef
+import Data.Maybe(isJust)
 
 -- Thanks to Alex Biehl for the idea of using continuations
 
-data WriteWaiter s a = forall b. WriteWaiter a (Bool -> CSP s b)
+data WriteWaiter s a = forall b. WriteWaiter a (Bool -> CSP s b) (b -> ST s ())
 
-data ReadWaiter s a = forall b. ReadWaiter (Maybe a -> CSP s b)
+data ReadWaiter s a = forall b. ReadWaiter (Maybe a -> CSP s b) (b -> ST s ())
 
 data ChannelRef s a = ChannelRef (STRef s (Channel s a))
 data Channel s a = Channel
@@ -28,9 +29,6 @@ data Channel s a = Channel
 
 writeBlocks :: Channel s a -> Bool
 writeBlocks chan = length (elements chan) == capacity chan
-
-readBlocks :: Channel s a -> Bool
-readBlocks chan = null $ elements chan
 
 mkChannel :: Int -> Channel s a
 mkChannel cap = Channel
@@ -58,45 +56,93 @@ writeChannel chan val = WriteChannel chan val return
 closeChannel chan = CloseChannel chan return
 a `orElse` b = OrElse a b return
 
-data ReadyCSP s = forall a. ReadyCSP (CSP s a)
+data ReadyCSP s = forall a. ReadyCSP (CSP s a) (a -> ST s ())
 
 data EvalState s a = EvalState
   { esReadyCSPs :: [ReadyCSP s] -- excluding the currently evaluating one
+  , esResult :: Maybe a
   }
 
-initialEvalState :: EvalState s a
-initialEvalState = EvalState
+emptyEvalState :: EvalState s a
+emptyEvalState = EvalState
   { esReadyCSPs = []
+  , esResult = Nothing
   }
 
 eval :: (forall s. CSP s a) -> Maybe a
 eval g = runST $ do
-    stateRef <- newSTRef initialEvalState
+    stateRef <- newSTRef $ emptyEvalState
     let
-      -- return: store result, done
-      eval' (Return a) = return $ Just a
-      -- go: add to ready CSPs
-      eval' (Go g cont) = do
+      store result = do
         state <- readSTRef stateRef
         writeSTRef stateRef state
-          { esReadyCSPs = (ReadyCSP g):esReadyCSPs state
+          { esResult = Just result
           }
-        eval' cont
+      discard finalResult = return ()
+
+      -- return: store result, done
+      eval' (Return a) finally = finally a
+      -- go: add to ready CSPs
+      eval' (Go g cont) finally = do
+        state <- readSTRef stateRef
+        writeSTRef stateRef state
+          { esReadyCSPs = ReadyCSP g discard:esReadyCSPs state
+          }
+        eval' cont finally
       -- newChannel: call continuation with new channel
-      eval' (NewChannel cap cont) = do
+      eval' (NewChannel cap cont) finally = do
         chanRef <- newSTRef $ mkChannel cap
-        eval' $ cont $ ChannelRef chanRef
+        eval' (cont $ ChannelRef chanRef) finally
       -- readChannel: continue if something available, block and continue one of the other CSPs otherwise
-      eval' (ReadChannel (ChannelRef chanRef) cont) = do
+      eval' (ReadChannel (ChannelRef chanRef) cont) finally = do
         chan <- readSTRef chanRef
-        return Nothing -- TODO
+        case elements chan of
+          -- if there's something in the channel, take that
+          x:xs -> do
+            writeSTRef chanRef chan{ elements = xs }
+            eval' (cont $ Just x) finally
+          [] -> if closed chan
+            -- if the channel is closed, continue likewise
+            then eval' (cont Nothing) finally
+            else case writeWaiters chan of
+              -- if there is nobody waiting to write, we must now wait to read
+              [] -> do
+                writeSTRef chanRef chan{ readWaiters = ReadWaiter cont finally : readWaiters chan }
+              -- if there's already a writer waiting to write to the channel, let it
+              WriteWaiter x andThen finally' : xs -> do
+                -- remove writer from writeWaiters
+                writeSTRef chanRef chan{ writeWaiters = xs }
+                -- put it into ready instead
+                state <- readSTRef stateRef
+                writeSTRef stateRef state
+                  { esReadyCSPs = ReadyCSP (andThen True) finally' : esReadyCSPs state
+                  }
+                eval' (cont $ Just x) finally
       -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
-      eval' (WriteChannel chanRef x cont) = undefined -- TODO
-      -- closeChannel: set channel to closed, unless it already was
-      eval' (CloseChannel chanRef cont) = undefined -- TODO
+      eval' (WriteChannel chanRef x cont) finally = undefined -- TODO
+      -- closeChannel: set channel to closed, unless it already was, and complete read and write waiters
+      eval' (CloseChannel chanRef cont) finally = undefined -- TODO
       -- orElse: TBD
-      eval' (OrElse g1 g2 cont) = undefined -- TODO
-    eval' g
+      eval' (OrElse g1 g2 cont) finally = undefined -- TODO
+
+      evalUntilDone = do
+        state <- readSTRef stateRef
+        -- stop as soon as there is a result
+        if isJust $ esResult state
+          then return $ esResult state
+          -- otherwise continue while there are more ready CSPs
+          else case esReadyCSPs state of
+            [] -> return Nothing
+            (ReadyCSP csp finally):xs -> do
+              eval' csp finally
+              evalUntilDone
+
+    -- put initial CSP in Ready list
+    writeSTRef stateRef emptyEvalState
+      { esReadyCSPs = [ReadyCSP g store]
+      }
+    -- start evaluation loop
+    evalUntilDone
 
 instance Functor (CSP s) where
   fmap f (Return a) = Return $ f a
