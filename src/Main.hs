@@ -15,9 +15,19 @@ takeWhileM cond action = fmap reverse $ takeWhileM' cond action []
 main :: IO ()
 main = do
   putStrLn $ show $ runCSP $ do
-    c <- newChannel 0
+    c1 <- newChannel 0
+    c2 <- newChannel 0
     go $ do
-      writeChannel c "hello"
-      writeChannel c "world"
-      closeChannel c
-    fmap (fmap fromJust) (takeWhileM (isJust) (readChannel c))
+      writeChannel c1 "hello"
+      writeChannel c2 42
+      closeChannel c1
+      closeChannel c2
+    let
+      testSelect = select
+        [ caseRead c1 $ return . Left
+        , caseRead c2 $ return . Right
+        ]
+    x <- testSelect
+    y <- testSelect
+    z <- testSelect
+    return (x, y, z)

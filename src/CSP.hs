@@ -3,7 +3,7 @@
 
 module CSP
   ( CSP
-  , go, newChannel, readChannel, writeChannel, closeChannel, orElse
+  , go, newChannel, readChannel, writeChannel, closeChannel, select, caseRead, caseWrite
   , runCSP
   , ChannelRef
   ) where
@@ -29,6 +29,13 @@ data Channel s a = Channel
   , writeWaiters :: [WriteWaiter s a]
   }
 
+--data ReadCase s a b = ReadCase (Maybe a -> CSP s b)
+
+data SelectCase s a =
+    forall b. CaseRead (ChannelRef s b) (Maybe b -> CSP s a)
+  | forall b. CaseWrite (ChannelRef s b) b (Bool -> CSP s a)
+
+
 writeBlocks :: Channel s a -> Bool
 writeBlocks chan = length (elements chan) == capacity chan
 
@@ -48,7 +55,7 @@ data CSP s a =
   | forall b. ReadChannel (ChannelRef s b) (Maybe b -> CSP s a)
   | forall b. WriteChannel (ChannelRef s b) b (Bool -> CSP s a)
   | forall b. CloseChannel (ChannelRef s b) (Bool -> CSP s a)
-  | forall b. OrElse (CSP s b) (CSP s b) (b -> CSP s a) -- choose first to be ready
+  | forall b. Select [SelectCase s b] (b -> CSP s a) -- choose first to be ready
 
 go csp = Go csp $ return ()
 newChannel cap = NewChannel cap return
@@ -56,7 +63,9 @@ readChannel :: forall s a. ChannelRef s a -> CSP s (Maybe a)
 readChannel chan = ReadChannel chan return
 writeChannel chan val = WriteChannel chan val return
 closeChannel chan = CloseChannel chan return
-a `orElse` b = OrElse a b return
+select cases = Select cases return
+caseRead = CaseRead
+caseWrite = CaseWrite
 
 data ReadyCSP s = forall a. ReadyCSP (CSP s a) (a -> ST s ())
 
@@ -183,8 +192,8 @@ runCSP g = runST $ do
             readyWriters $ writeWaiters chan
             readyReaders $ readWaiters chan
             eval (cont True) finally
-      -- orElse: TBD
-      eval (OrElse g1 g2 cont) finally = return () -- TODO
+      -- Select: TBD
+      eval (Select cases cont) finally = return () -- TODO
 
       evalUntilDone = do
         state <- readSTRef stateRef
@@ -213,7 +222,7 @@ instance Functor (CSP s) where
   fmap f (ReadChannel chan cont) = ReadChannel chan $ \val -> fmap f $ cont val
   fmap f (WriteChannel chan val cont) = WriteChannel chan val $ \success -> fmap f $ cont success
   fmap f (CloseChannel chan cont) = CloseChannel chan $ \success -> fmap f $ cont success
-  fmap f (OrElse g1 g2 cont) = OrElse g1 g2 $ \val -> fmap f $ cont val
+  fmap f (Select cases cont) = Select cases $ \val -> fmap f $ cont val
 
 instance Applicative (CSP s) where
   pure = Return
@@ -223,7 +232,7 @@ instance Applicative (CSP s) where
   (ReadChannel chan cont) <*> x = ReadChannel chan $ (<*> x) . cont
   (WriteChannel chan val cont) <*> x = WriteChannel chan val $ (<*> x) . cont
   (CloseChannel chan cont) <*> x = CloseChannel chan $ (<*> x) . cont
-  (OrElse g1 g2 cont) <*> x = OrElse g1 g2 $ (<*> x) . cont 
+  (Select cases cont) <*> x = Select cases $ (<*> x) . cont 
 
 instance Monad (CSP s) where
   return = pure
@@ -233,4 +242,4 @@ instance Monad (CSP s) where
   (ReadChannel chan cont) >>= f = ReadChannel chan $ \val -> cont val >>= f
   (WriteChannel chan val cont) >>= f = WriteChannel chan val $ \success -> cont success >>= f
   (CloseChannel chan cont) >>= f = CloseChannel chan $ \success -> cont success >>= f
-  (OrElse g1 g2 cont) >>= f = OrElse g1 g2 $ \val -> cont val >>= f
+  (Select cases cont) >>= f = Select cases $ \val -> cont val >>= f
