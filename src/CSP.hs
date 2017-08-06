@@ -160,7 +160,29 @@ runCSP g = runST $ do
                   }
                 eval (cont True) finally
       -- closeChannel: set channel to closed, unless it already was, and complete read and write waiters
-      eval (CloseChannel (ChannelRef chanRef) cont) finally = return () -- TODO
+      eval (CloseChannel (ChannelRef chanRef) cont) finally = do
+        chan <- readSTRef chanRef
+        if closed chan
+          -- already closed
+          then eval (cont False) finally
+          else do
+            let
+              readyWriters [] = return ()
+              readyWriters (WriteWaiter _ cont' finally' : ws) = do
+                ready (cont' False) finally'
+                readyWriters ws
+              readyReaders [] = return ()
+              readyReaders (ReadWaiter cont' finally' : ws) = do
+                ready (cont' Nothing) finally'
+                readyReaders ws
+            writeSTRef chanRef chan
+                { closed = True
+                , readWaiters = []
+                , writeWaiters = []
+                }
+            readyWriters $ writeWaiters chan
+            readyReaders $ readWaiters chan
+            eval (cont True) finally
       -- orElse: TBD
       eval (OrElse g1 g2 cont) finally = return () -- TODO
 
