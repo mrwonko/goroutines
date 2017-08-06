@@ -22,7 +22,9 @@ data ChannelRef s a = ChannelRef (STRef s (Channel s a))
 data Channel s a = Channel
   { capacity :: Int
   , closed :: Bool
+  -- FIXME: more efficient FIFO
   , elements :: [a]
+  -- FIXME: it's pretty unfair to have a LIFO for waiters
   , readWaiters :: [ReadWaiter s a]
   , writeWaiters :: [WriteWaiter s a]
   }
@@ -80,6 +82,12 @@ runCSP g = runST $ do
           }
       discard finalResult = return ()
 
+      ready csp finally = do
+        state <- readSTRef stateRef
+        writeSTRef stateRef state
+          { esReadyCSPs = ReadyCSP csp finally : esReadyCSPs state
+          }
+
       -- return: store result, done
       eval (Return a) finally = finally a
       -- go: add to ready CSPs
@@ -99,7 +107,17 @@ runCSP g = runST $ do
         case elements chan of
           -- if there's something in the channel, take that
           x:xs -> do
-            writeSTRef chanRef chan{ elements = xs }
+            -- now let the first write waiter, if any, write (if the channel is closed, there should be none)
+            case writeWaiters chan of
+              [] -> writeSTRef chanRef chan{ elements = xs }
+              WriteWaiter x cont' finally' : ws -> do
+                -- remove from waiters and add element
+                writeSTRef chanRef chan
+                  { elements = xs ++ [x]
+                  , writeWaiters = ws
+                  }
+                -- and add writer to ready
+                ready (cont' True) finally'
             eval (cont $ Just x) finally
           [] -> if closed chan
             -- if the channel is closed, continue likewise
@@ -109,19 +127,28 @@ runCSP g = runST $ do
               [] -> do
                 writeSTRef chanRef chan{ readWaiters = ReadWaiter cont finally : readWaiters chan }
               -- if there's already a writer waiting to write to the channel, let it
-              WriteWaiter x andThen finally' : xs -> do
+              WriteWaiter x cont' finally' : ws -> do
                 -- remove writer from writeWaiters
-                writeSTRef chanRef chan{ writeWaiters = xs }
+                writeSTRef chanRef chan{ writeWaiters = ws }
                 -- put it into ready instead
-                state <- readSTRef stateRef
-                writeSTRef stateRef state
-                  { esReadyCSPs = ReadyCSP (andThen True) finally' : esReadyCSPs state
-                  }
+                ready (cont' True) finally'
+                -- and continue executing the reader (we could arguably also execute the writer first)
                 eval (cont $ Just x) finally
       -- writeChannel: continue if capacity left in channel, block and continue of the other CSPs otherwise
-      eval (WriteChannel chanRef x cont) finally = return () -- TODO
+      eval (WriteChannel (ChannelRef chanRef) x cont) finally = do
+        chan <- readSTRef chanRef
+        if closed chan
+          then eval (cont False) finally
+          else  if writeBlocks chan
+            then return () -- TODO
+            else do
+              -- still space in channel, store result and continue
+              writeSTRef chanRef chan
+                { elements = elements chan ++ [x]
+                }
+              eval (cont True) finally
       -- closeChannel: set channel to closed, unless it already was, and complete read and write waiters
-      eval (CloseChannel chanRef cont) finally = return () -- TODO
+      eval (CloseChannel (ChannelRef chanRef) cont) finally = return () -- TODO
       -- orElse: TBD
       eval (OrElse g1 g2 cont) finally = return () -- TODO
 
@@ -141,9 +168,7 @@ runCSP g = runST $ do
               evalUntilDone
 
     -- put initial CSP in Ready list
-    writeSTRef stateRef emptyEvalState
-      { esReadyCSPs = [ReadyCSP g store]
-      }
+    ready g store
     -- start evaluation loop
     evalUntilDone
 
