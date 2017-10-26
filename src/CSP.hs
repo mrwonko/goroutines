@@ -11,6 +11,7 @@ module CSP
 import Control.Monad.ST
 import Data.STRef
 import Data.Maybe(isJust)
+import Data.Map.Strict
 
 -- Thanks to Alex Biehl for the idea of using continuations
 
@@ -27,13 +28,22 @@ data Channel s a = Channel
   -- FIXME: it's pretty unfair to have a LIFO for waiters
   , readWaiters :: [ReadWaiter s a]
   , writeWaiters :: [WriteWaiter s a]
+  , readSelectWaiters :: Map SelectID  [SelectCase s a]
+  , writeSelectWaiters :: Map SelectID [SelectCase s a]
   }
 
 --data ReadCase s a b = ReadCase (Maybe a -> CSP s b)
 
 data SelectCase s a =
-    forall b. CaseRead (ChannelRef s b) (Maybe b -> CSP s a)
-  | forall b. CaseWrite (ChannelRef s b) b (Bool -> CSP s a)
+    forall b. CaseRead (ChannelRef s b) (Maybe b -> CSP s a) -- read from channel, which succeeeds or fails
+  | forall b. CaseWrite (ChannelRef s b) b (Bool -> CSP s a) -- write something into channel, which succeeds or fails
+
+data SelectID = SelectID Int
+
+data SelectState s a = SelectState
+    { cases :: [SelectCase s a]
+    , selectID :: SelectID
+    }
 
 
 writeBlocks :: Channel s a -> Bool
@@ -46,6 +56,8 @@ mkChannel cap = Channel
     , elements = []
     , readWaiters = []
     , writeWaiters = []
+    , readSelectWaiters = empty
+    , writeSelectWaiters = empty
     }
 
 data CSP s a =
@@ -72,12 +84,14 @@ data ReadyCSP s = forall a. ReadyCSP (CSP s a) (a -> ST s ())
 data EvalState s a = EvalState
   { esReadyCSPs :: [ReadyCSP s] -- excluding the currently evaluating one
   , esResult :: Maybe a
+  , esNextSelectID :: SelectID
   }
 
 emptyEvalState :: EvalState s a
 emptyEvalState = EvalState
   { esReadyCSPs = []
   , esResult = Nothing
+  , esNextSelectID = SelectID 0
   }
 
 runCSP :: (forall s. CSP s a) -> Maybe a
@@ -125,7 +139,7 @@ runCSP g = runST $ do
                   { elements = xs ++ [x]
                   , writeWaiters = ws
                   }
-                -- and add writer to ready
+                -- and add writer to list of ready CSPs
                 ready (cont' True) finally'
             eval (cont $ Just x) finally
           [] -> if closed chan
